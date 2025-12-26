@@ -16,9 +16,13 @@ import (
 )
 
 const (
-	ingressEndpointFlag = "ingress-endpoint"
-	ingressAPIKeyFlag   = "ingress-api-key"
-	xmlFileFlag         = "xml-file"
+	ingressEndpointFlag    = "ingress-endpoint"
+	ingressAPIKeyFlag      = "ingress-api-key"
+	xmlFileFlag            = "xml-file"
+	sessionIDFlag          = "session-id"
+	sessionDescriptionFlag = "session-description"
+	sessionLabelsFlag      = "session-labels"
+	sessionBaggageFlag     = "session-baggage"
 )
 
 type TestSuites struct {
@@ -62,9 +66,15 @@ type Skipped struct {
 	Message string `xml:"message,attr,omitempty"`
 }
 
+type Label struct {
+	Key   string `json:"key"`
+	Value string `json:"value,omitempty"`
+}
+
 type SessionRequest struct {
 	Id          string         `json:"id,omitempty"`
 	Description string         `json:"description,omitempty"`
+	Labels      []Label        `json:"labels,omitempty"`
 	Baggage     map[string]any `json:"baggage,omitempty"`
 }
 
@@ -88,23 +98,67 @@ type TestcasesRequest struct {
 }
 
 type Reporter struct {
-	endpoint  string
-	apiKey    string
-	sessionId string
-	client    *http.Client
+	endpoint           string
+	apiKey             string
+	sessionId          string
+	sessionDescription string
+	sessionLabels      []Label
+	sessionBaggage     map[string]any
+	client             *http.Client
 }
 
-func NewReporter(endpoint, apiKey string) *Reporter {
+func NewReporter(
+	endpoint, apiKey, sessionID, sessionDescription string,
+	sessionLabels []Label,
+	sessionBaggage map[string]any,
+) *Reporter {
 	return &Reporter{
-		endpoint: strings.TrimSuffix(endpoint, "/"),
-		apiKey:   apiKey,
-		client:   &http.Client{},
+		endpoint:           strings.TrimSuffix(endpoint, "/"),
+		apiKey:             apiKey,
+		sessionId:          sessionID,
+		sessionDescription: sessionDescription,
+		sessionLabels:      sessionLabels,
+		sessionBaggage:     sessionBaggage,
+		client:             &http.Client{},
 	}
+}
+
+func parseLabels(labelsStr string) []Label {
+	if labelsStr == "" {
+		return nil
+	}
+
+	var labels []Label
+	for labelStr := range strings.SplitSeq(labelsStr, ",") {
+		labelStr = strings.TrimSpace(labelStr)
+		if labelStr == "" {
+			continue
+		}
+
+		if before, after, ok := strings.Cut(labelStr, "="); ok {
+			labels = append(labels, Label{
+				Key:   before,
+				Value: after,
+			})
+		} else {
+			labels = append(labels, Label{
+				Key: labelStr,
+			})
+		}
+	}
+	return labels
 }
 
 func (r *Reporter) createSession() error {
 	req := SessionRequest{
-		Description: "JUnit XML test report",
+		Id:          r.sessionId,
+		Description: r.sessionDescription,
+		Labels:      r.sessionLabels,
+		Baggage:     r.sessionBaggage,
+	}
+
+	if req.Description == "" {
+		req.Description = "JUnit XML test report"
 	}
 
 	body, err := json.Marshal(req)
@@ -212,8 +266,21 @@ func run(ctx context.Context, c *cli.Command) error {
 	endpoint := c.String(ingressEndpointFlag)
 	apiKey := c.String(ingressAPIKeyFlag)
 	xmlFile := c.String(xmlFileFlag)
+	sessionID := c.String(sessionIDFlag)
+	sessionDescription := c.String(sessionDescriptionFlag)
+	sessionLabelsStr := c.String(sessionLabelsFlag)
+	sessionBaggageStr := c.String(sessionBaggageFlag)
 
-	reporter := NewReporter(endpoint, apiKey)
+	sessionLabels := parseLabels(sessionLabelsStr)
+
+	var sessionBaggage map[string]any
+	if sessionBaggageStr != "" {
+		if err := json.Unmarshal([]byte(sessionBaggageStr), &sessionBaggage); err != nil {
+			return fmt.Errorf("parse session baggage: %w", err)
+		}
+	}
+
+	reporter := NewReporter(endpoint, apiKey, sessionID, sessionDescription, sessionLabels, sessionBaggage)
 
 	if err := reporter.createSession(); err != nil {
 		return fmt.Errorf("create session: %w", err)
@@ -268,6 +335,26 @@ func main() {
 				Usage:    "Path to JUnit XML file (use '-' for stdin)",
 				Aliases:  []string{"f"},
 				Required: true,
+			},
+			&cli.StringFlag{
+				Name:    sessionIDFlag,
+				Usage:   "Session ID (optional, will be generated if not provided)",
+				Sources: cli.EnvVars("GREENER_SESSION_ID"),
+			},
+			&cli.StringFlag{
+				Name:    sessionDescriptionFlag,
+				Usage:   "Session description",
+				Sources: cli.EnvVars("GREENER_SESSION_DESCRIPTION"),
+			},
+			&cli.StringFlag{
+				Name:    sessionLabelsFlag,
+				Usage:   "Session labels (comma-separated, e.g. 'ci,tag=value')",
+				Sources: cli.EnvVars("GREENER_SESSION_LABELS"),
+			},
+			&cli.StringFlag{
+				Name:    sessionBaggageFlag,
+				Usage:   "Session baggage (JSON object)",
+				Sources: cli.EnvVars("GREENER_SESSION_BAGGAGE"),
 			},
 		},
 		Action: run,
